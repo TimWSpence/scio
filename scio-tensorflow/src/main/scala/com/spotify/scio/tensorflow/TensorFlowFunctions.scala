@@ -41,7 +41,9 @@ import org.apache.beam.sdk.{io => gio}
 import org.slf4j.LoggerFactory
 import org.tensorflow._
 import org.tensorflow.example.Example
+import org.tensorflow.example.Feature.KindCase
 import org.tensorflow.framework.ConfigProto
+import org.tensorflow.metadata.v0._
 
 import scala.concurrent.Future
 import scala.reflect.ClassTag
@@ -269,6 +271,65 @@ class TFExampleSCollectionFunctions[T <: Example](val self: SCollection[T]) {
     self.saveAsTfExampleFile(path,
                              FeatranTFRecordSpec.fromFeatureSpec(fe.featureNames),
                              compression = compression)
+
+
+  /**
+   * Save this SCollection of `org.tensorflow.example.Example` as a TensorFlow TFRecord file,
+   * along with a protobuf file representing the schema.
+   * @group output
+   */
+  def saveAsTfExampleFileWithMetadata(path: String,
+                                      suffix: String = ".tfrecords",
+                                      compression: Compression = Compression.UNCOMPRESSED,
+                                      numShards: Int = 0)
+                                     (implicit ev: T <:< Example):
+  (Future[Tap[Example]], Future[Tap[Schema]]) = {
+    import scala.concurrent.ExecutionContext.Implicits.global
+
+    val features = examplesToFeatures(self.asInstanceOf[SCollection[Example]])
+    val schema = features
+      .groupBy(_ => ())
+      .values.map { features =>
+        Schema.newBuilder().addAllFeature(features.asJava).build()
+      }
+//    val schemaPath = path.replaceAll("\\/+$", "") + "/schema.protobuf"
+    // FIXME: do we actually want to do this instead of write the proto directly?
+    val schemaTap = schema.saveAsProtobufFile(path)
+    val r = self.map(_.toByteArray).saveAsTfRecordFile(path, suffix, compression, numShards)
+    (r.map(_.map(Example.parseFrom)), schemaTap)
+  }
+
+  private def examplesToFeatures(examples: SCollection[Example]): SCollection[Feature] = {
+    examples
+      .flatMap(_.getFeatures.getFeatureMap.asScala)
+      .map { case (name, f) =>
+        f.getKindCase match {
+          case KindCase.BYTES_LIST =>
+            ((name, FeatureType.BYTES), Set(f.getBytesList.getValueCount))
+          case KindCase.FLOAT_LIST =>
+            ((name, FeatureType.FLOAT), Set(f.getFloatList.getValueCount))
+          case KindCase.INT64_LIST =>
+            ((name, FeatureType.INT), Set(f.getInt64List.getValueCount))
+          case KindCase.KIND_NOT_SET => sys.error("kind must be set!")
+        }
+      }
+      .sumByKey
+      .map { case ((name, f), shapes) =>
+        val builder = Feature.newBuilder()
+          .setName(name)
+          .setType(f)
+        if (shapes.size == 1) {
+          // This is a fixed length feature
+          builder.setShape(FixedShape.newBuilder()
+            .addDim(FixedShape.Dim.newBuilder().setSize(shapes.head)))
+        }
+        else {
+          // Var length
+          builder.setValueCount(ValueCount.newBuilder().setMin(shapes.min).setMax(shapes.max))
+        }
+        builder.build()
+      }
+  }
 }
 
 class SeqTFExampleSCollectionFunctions[T <: Example](@transient val self: SCollection[Seq[T]])
