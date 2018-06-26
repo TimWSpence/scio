@@ -24,7 +24,13 @@ import scala.util.control.NonFatal
 object OverrideTypeProviderFinder {
   private val instance = {
     // Load the class dynamically at compile time and runtime
-    val classInstance = Try(Class.forName(System.getProperty("override.type.provider", ""))
+    // FIXME: detect whether in the Scio repo
+    val clsName = if (true) {
+      "com.spotify.scio.bigquery.validation.SampleOverrideTypeProvider"
+    } else {
+      System.getProperty("override.type.provider", "")
+    }
+    val classInstance = Try(Class.forName(clsName)
       .newInstance()
       .asInstanceOf[OverrideTypeProvider])
     classInstance match {
